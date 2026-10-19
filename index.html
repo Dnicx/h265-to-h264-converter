@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>H.265 to H.264 Converter</title>
+<style>
+  :root { color-scheme: dark; --bg:#11151b; --panel:#1a2029; --border:#303947; --text:#edf2f7; --muted:#aab5c4; --accent:#79a9ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:32px 16px; background:var(--bg); color:var(--text); font:16px/1.5 system-ui,-apple-system,Segoe UI,sans-serif; }
+  main { max-width:760px; margin:0 auto; }
+  h1 { font-size:clamp(1.5rem,4vw,2rem); margin:0 0 8px; }
+  .intro { color:var(--muted); margin:0 0 24px; }
+  section { background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:20px; margin:16px 0; }
+  label { display:block; font-weight:600; margin:0 0 8px; }
+  label.inline { display:flex; gap:8px; align-items:flex-start; font-weight:400; margin:12px 0 0; }
+  input[type=file] { width:100%; padding:12px; border:1px dashed #536174; border-radius:9px; background:#141922; color:var(--text); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:18px; }
+  .hint, .muted { color:var(--muted); font-size:.9rem; }
+  input[type=range] { width:100%; accent-color:var(--accent); }
+  select { width:100%; padding:10px; border-radius:8px; background:#141922; color:var(--text); border:1px solid var(--border); }
+  .range-head { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+  output { font-variant-numeric:tabular-nums; font-weight:700; }
+  button, .download { display:inline-block; border:0; border-radius:9px; padding:11px 16px; background:var(--accent); color:#101722; font-weight:700; text-decoration:none; cursor:pointer; font-size:1rem; }
+  button.secondary { background:#3a4656; color:var(--text); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  .actions { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-top:16px; }
+  progress { width:100%; height:14px; margin-top:12px; accent-color:var(--accent); }
+  #status { white-space:pre-wrap; overflow-wrap:anywhere; margin-top:12px; }
+  #log { white-space:pre-wrap; overflow-wrap:anywhere; font:12px/1.4 ui-monospace,Consolas,monospace; color:var(--muted); background:#10151c; border-radius:8px; padding:10px; max-height:220px; overflow:auto; }
+  details summary { cursor:pointer; color:var(--muted); margin-top:12px; }
+  .warning { border-left:3px solid #e7b45b; color:#e8d7b6; }
+  .hidden { display:none; }
+  code { background:#10151c; padding:2px 5px; border-radius:4px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>H.265 → H.264 MP4 Converter</h1>
+  <p class="intro">Converts a video inside your browser. The video stays on this device; it is not uploaded anywhere. <span id="modeNote"></span></p>
+
+  <section>
+    <label for="file">Input video</label>
+    <input id="file" type="file" accept="video/mp4,video/quicktime,.mp4,.mov,.mkv,video/*">
+    <p id="fileInfo" class="muted">Choose an input video to begin.</p>
+  </section>
+
+  <section>
+    <div class="grid">
+      <div>
+        <div class="range-head"><label for="crf">Video quality (CRF)</label><output id="crfValue">18</output></div>
+        <input id="crf" type="range" min="0" max="51" value="18">
+        <p class="hint">Lower = higher quality, larger file. 18 ≈ visually lossless; 23 is smaller.</p>
+      </div>
+      <div>
+        <label for="preset">Encoding speed</label>
+        <select id="preset">
+          <option value="ultrafast">Ultrafast (largest file)</option>
+          <option value="veryfast">Very fast</option>
+          <option value="fast">Fast</option>
+          <option value="medium" selected>Medium (default)</option>
+          <option value="slow">Slow (smaller file, much longer)</option>
+        </select>
+        <p class="hint">In-browser encoding is slow. Pick a faster preset for long videos.</p>
+      </div>
+    </div>
+    <label class="inline"><input id="pix" type="checkbox" checked><span>Force 8-bit <code>yuv420p</code> (recommended: 10-bit H.265 sources otherwise produce H.264 that many players can't open)</span></label>
+    <p class="hint">Audio is copied as-is (<code>-c:a copy</code>).</p>
+    <div class="actions">
+      <button id="convert" disabled>Convert to H.264</button>
+      <button id="cancel" class="secondary" disabled>Cancel</button>
+    </div>
+    <progress id="progress" value="0" max="1" class="hidden"></progress>
+    <div id="status" role="status" aria-live="polite" class="muted"></div>
+    <details><summary>FFmpeg log</summary><div id="log"></div></details>
+  </section>
+
+  <section id="result" class="hidden">
+    <h2 style="font-size:1.1rem;margin-top:0">Conversion complete</h2>
+    <p id="resultInfo" class="muted"></p>
+    <a id="download" class="download">Download converted MP4</a>
+  </section>
+
+  <section class="warning">
+    <strong>Notes</strong>
+    <ul>
+      <li>Use Chrome, Edge or Safari. Keep this tab open and in front while converting; on phones, don't lock the screen or switch apps.</li>
+      <li>Speed is several times slower than desktop FFmpeg, and slower still on phones. A few minutes of 1080p can take a long while.</li>
+      <li>The converted video is held in memory, so very large outputs (over ~1.5 GB) may fail.</li>
+      <li>Equivalent command: <code id="cmd"></code></li>
+    </ul>
+  </section>
+</main>
+
+<script>
+
+// Hosted version: FFmpeg engine files live next to this page (same site).
+const ENGINE_NOTE = 'The FFmpeg engine (~31 MB) downloads from this site on first use, then is cached by the browser.';
+const ENGINE_IDLE_STATUS = 'Ready.';
+async function loadEngineFiles(setStatus) {
+  setStatus('Downloading FFmpeg engine (~31 MB, first time only)…');
+  const get = async (name, kind) => {
+    const r = await fetch(new URL(name, location.href));
+    if (!r.ok) throw new Error(`Could not download ${name} (HTTP ${r.status}).`);
+    return kind === 'text' ? r.text() : r.arrayBuffer();
+  };
+  const [js, wasm] = await Promise.all([get('ffmpeg-core.js', 'text'), get('ffmpeg-core.wasm', 'bin')]);
+  return { coreText: js, wasm };
+}
+
+
+// ---- Worker source (classic worker; FFmpeg core is prepended at runtime) ----
+const WORKER_MAIN = `
+let core = null;
+self.onmessage = async ({ data: msg }) => {
+  try {
+    if (msg.type === 'load') {
+      core = await createFFmpegCore({ wasmBinary: msg.wasm });
+      core.setLogger((d) => self.postMessage({ type: 'log', message: d.message }));
+      core.setProgress((d) => self.postMessage({ type: 'progress', progress: d.progress, time: d.time }));
+      self.postMessage({ type: 'loaded' });
+    } else if (msg.type === 'convert') {
+      const FS = core.FS;
+      let inPath;
+      try {
+        FS.mkdir('/in');
+        FS.mount(FS.filesystems.WORKERFS, { files: [msg.file] }, '/in');
+        inPath = '/in/' + msg.file.name;            // reads the file lazily, no full copy in memory
+      } catch (e) {
+        inPath = '/input' + (msg.ext || '.mp4');
+        FS.writeFile(inPath, new Uint8Array(await msg.file.arrayBuffer()));
+      }
+      const outPath = '/output.mp4';
+      core.setTimeout(-1);
+      core.exec('-i', inPath, ...msg.args, outPath);
+      const ret = core.ret;
+      core.reset();
+      let out = null;
+      if (ret === 0) out = FS.readFile(outPath);
+      try { FS.unlink(outPath); } catch (e) {}
+      try { FS.unmount('/in'); FS.rmdir('/in'); } catch (e) {}
+      try { if (!inPath.startsWith('/in/')) FS.unlink(inPath); } catch (e) {}
+      self.postMessage({ type: 'done', ret, out }, out ? [out.buffer] : []);
+    }
+  } catch (e) {
+    self.postMessage({ type: 'error', message: String(e && e.message || e) });
+  }
+};`;
+
+const $ = (s) => document.querySelector(s);
+const fileInput = $('#file'), fileInfo = $('#fileInfo'), crfInput = $('#crf'), crfValue = $('#crfValue');
+const presetInput = $('#preset'), pixInput = $('#pix'), convertButton = $('#convert'), cancelButton = $('#cancel');
+const progress = $('#progress'), status = $('#status'), logBox = $('#log');
+const result = $('#result'), resultInfo = $('#resultInfo'), download = $('#download'), cmd = $('#cmd');
+
+let engine = null;        // { coreText, wasm } cached after first load
+let workerURL = null;
+let worker = null;        // live worker with core loaded
+let busy = false, outputUrl = null, logLines = [];
+
+$('#modeNote').textContent = ENGINE_NOTE;
+status.textContent = ENGINE_IDLE_STATUS;
+
+function prettyBytes(b) {
+  const u = ['B', 'KB', 'MB', 'GB']; let i = 0;
+  while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
+  return `${b.toFixed(i ? 1 : 0)} ${u[i]}`;
+}
+function setStatus(m) { status.textContent = m; }
+function addLog(m) {
+  logLines.push(m); if (logLines.length > 400) logLines.shift();
+  logBox.textContent = logLines.join('\n'); logBox.scrollTop = logBox.scrollHeight;
+}
+function buildArgs() {
+  const a = ['-c:v', 'libx264', '-crf', crfInput.value, '-preset', presetInput.value];
+  if (pixInput.checked) a.push('-pix_fmt', 'yuv420p');
+  a.push('-c:a', 'copy', '-movflags', '+faststart');
+  return a;
+}
+function updateCmd() { cmd.textContent = `ffmpeg -i input.mp4 ${buildArgs().join(' ')} output.mp4`; }
+[crfInput, presetInput, pixInput].forEach((el) => el.addEventListener('input', () => { crfValue.value = crfInput.value; updateCmd(); }));
+updateCmd();
+
+fileInput.addEventListener('change', () => {
+  const f = fileInput.files?.[0];
+  convertButton.disabled = !f || busy;
+  result.classList.add('hidden');
+  if (outputUrl) { URL.revokeObjectURL(outputUrl); outputUrl = null; }
+  fileInfo.textContent = f ? `${f.name} · ${prettyBytes(f.size)}` : 'Choose an input video to begin.';
+});
+
+async function getWorker() {
+  if (worker) return worker;
+  if (!engine) engine = await loadEngineFiles(setStatus);   // defined per build (CDN or embedded)
+  if (!workerURL) workerURL = URL.createObjectURL(new Blob([engine.coreText, '\n', WORKER_MAIN], { type: 'text/javascript' }));
+  setStatus('Starting FFmpeg…');
+  const w = new Worker(workerURL);
+  await new Promise((resolve, reject) => {
+    w.onmessage = ({ data }) => {
+      if (data.type === 'loaded') resolve();
+      else if (data.type === 'error') reject(new Error(data.message));
+    };
+    w.onerror = (e) => reject(new Error(e.message || 'Worker failed to start'));
+    w.postMessage({ type: 'load', wasm: engine.wasm });   // copied, so it can be reused after Cancel
+  });
+  worker = w;
+  return w;
+}
+
+function runConvert(w, file) {
+  return new Promise((resolve, reject) => {
+    w.onerror = (e) => reject(new Error(e.message || 'Worker crashed (possibly out of memory)'));
+    w.onmessage = ({ data }) => {
+      if (data.type === 'log') {
+        addLog(data.message);
+      } else if (data.type === 'progress') {
+        const p = Math.max(0, Math.min(1, data.progress));
+        if (Number.isFinite(p) && p > 0) {
+          progress.value = p;
+          setStatus(`Encoding… ${Math.round(p * 100)}%`);
+        }
+      } else if (data.type === 'done') resolve(data);
+      else if (data.type === 'error') reject(new Error(data.message));
+    };
+    const ext = (file.name.match(/\.[^.]+$/) || ['.mp4'])[0];
+    w.postMessage({ type: 'convert', file, ext, args: buildArgs() });
+  });
+}
+
+function lastErrorLines() {
+  return logLines.filter((l) => /error|invalid|failed|not supported|could not|unknown/i.test(l)).slice(-4).join('\n');
+}
+
+convertButton.addEventListener('click', async () => {
+  const file = fileInput.files?.[0];
+  if (!file || busy) return;
+  busy = true;
+  convertButton.disabled = true; cancelButton.disabled = false; fileInput.disabled = true;
+  progress.classList.remove('hidden'); progress.value = 0;
+  result.classList.add('hidden');
+  if (outputUrl) { URL.revokeObjectURL(outputUrl); outputUrl = null; }
+  logLines = []; logBox.textContent = '';
+  const t0 = performance.now();
+  try {
+    const w = await getWorker();
+    setStatus('Encoding H.264… (progress appears after FFmpeg reads the file)');
+    const { ret, out } = await runConvert(w, file);
+    if (ret !== 0 || !out) throw new Error(`FFmpeg exited with code ${ret}.\n${lastErrorLines()}`);
+    const blob = new Blob([out], { type: 'video/mp4' });
+    outputUrl = URL.createObjectURL(blob);
+    download.href = outputUrl;
+    download.download = `${file.name.replace(/\.[^.]+$/, '') || 'video'}_h264.mp4`;
+    const mins = ((performance.now() - t0) / 60000).toFixed(1);
+    resultInfo.textContent = `Output size: ${prettyBytes(blob.size)} (input ${prettyBytes(file.size)}). Took ${mins} min.`;
+    result.classList.remove('hidden');
+    progress.value = 1;
+    setStatus('Done. Click the button below to save the file.');
+  } catch (e) {
+    if (busy) setStatus(`Conversion failed: ${e.message || e}`);
+    // a crashed or failed worker may be in a bad state; start fresh next time
+    try { worker?.terminate(); } catch {}
+    worker = null;
+  } finally {
+    busy = false;
+    convertButton.disabled = !fileInput.files?.[0];
+    cancelButton.disabled = true;
+    fileInput.disabled = false;
+  }
+});
+
+cancelButton.addEventListener('click', () => {
+  if (!busy) return;
+  try { worker?.terminate(); } catch {}
+  worker = null;
+  busy = false;
+  setStatus('Cancelled.');
+  progress.value = 0;
+  convertButton.disabled = !fileInput.files?.[0];
+  cancelButton.disabled = true;
+  fileInput.disabled = false;
+});
+</script>
+</body>
+</html>
